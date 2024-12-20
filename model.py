@@ -5,8 +5,7 @@ import torch.nn as nn
 class InputEmbeddings(nn.Module):
 
     def __init__(self, d_model: int, vocab_size: int):
-        super().__init__
-        
+        super().__init__()
         self.d_model = d_model # d_model = 512
         self.vocab_size = vocab_size
         self.embedding = nn.Embedding(vocab_size, d_model)
@@ -18,7 +17,7 @@ class InputEmbeddings(nn.Module):
 class PositionalEncoding(nn.Module):
     
     def __init__(self, d_model: int, max_length_of_seq: int, dropout: float):
-        super().__init__
+        super().__init__()
         self.d_model = d_model
         self.max_length_of_seq = max_length_of_seq
         self.dropout = nn.Dropout(p=dropout) # most probably 0.5
@@ -26,7 +25,7 @@ class PositionalEncoding(nn.Module):
         pe = torch.zeros(max_length_of_seq, d_model) # Create Matrix [max_len x d_model]
         # arange creates a [1 x max_len] array
         pos = torch.arange(0, max_length_of_seq).unsqueeze(1) # unsqueeze creates a [max_len x 1] array
-        denominator = torch.exp(torch.arange(0, d_model, 2) * -(math.log(10000.0) / d_model)) # both even and odd denominators are same 
+        denominator = torch.exp(torch.arange(0, d_model, 2) * (-math.log(10000.0) / d_model)) # both even and odd denominators are same 
         pe[:, 0::2] = torch.sin(pos * denominator)
         pe[:, 1::2] = torch.cos(pos * denominator)
         pe = pe.unsqueeze(0)
@@ -35,8 +34,8 @@ class PositionalEncoding(nn.Module):
     def forward(self, main_input):
         # main_input = [batch_size x seq_len x d_model]
         # pe = [batch_size (1) x max_seq_len x d_model]
-        # we want our input to map to the seq_len hence size(1) <-- second index of size
-        main_input = main_input + (self.pe[:, main_input.size(1), :]).requires_grad(False)
+        # we want our input to map to the seq_len hence shape(1) <-- second index of size
+        main_input = main_input + (self.pe[:, :main_input.shape[1], :]).requires_grad_(False)
         return self.dropout(main_input)
 
 
@@ -94,7 +93,7 @@ class MultiHeadAttention(nn.Module):
         self.dropout = nn.Dropout(dropout)
 
     @staticmethod # do not need instance of class to call the function
-    def scaled_dot_product_attention(self, query, key, value, mask, dropout: nn.Dropout):
+    def scaled_dot_product_attention(query, key, value, mask, dropout: nn.Dropout):
         d_k = query.shape[-1]
 
         # query size: [batch, h, seq_len, d_k]
@@ -148,10 +147,10 @@ class ResidualConnection(nn.Module):
 
 class EncoderBlock(nn.Module):
 
-    def _init__(self, self_attention: MultiHeadAttention, feed_forward: FeedForwardNetwork, dropout: float):
+    def __init__(self, self_attention: MultiHeadAttention, feed_forward: FeedForwardNetwork, dropout: float):
         super().__init__()
         self.self_attention = self_attention
-        self.feed_forward = self.feed_forward
+        self.feed_forward = feed_forward
         # Create a List of Modules
         self.residual_connection = nn.ModuleList([ResidualConnection(dropout) for _ in range(2)])
 
@@ -236,39 +235,40 @@ class Transformer(nn.Module):
     def projection(self, decoder_output): 
         return self.proj_layer(decoder_output)
 
-    def build_transformer(src_vocab_size: int, trgt_vocab_size: int, src_seq_len: int, trgt_seq_len: int, d_model: int = 512, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 2048):
-        # Create Embedding 
-        src_embedding = InputEmbeddings(d_model, src_vocab_size)
-        trgt_embedding = InputEmbeddings(d_model, trgt_vocab_size)
+   
+def build_transformer(src_vocab_size: int, trgt_vocab_size: int, src_seq_len: int, trgt_seq_len: int, d_model: int = 512, N: int = 6, h: int = 8, dropout: float = 0.1, d_ff: int = 2048):
+    # Create Embedding 
+    src_embedding = InputEmbeddings(d_model, src_vocab_size)
+    trgt_embedding = InputEmbeddings(d_model, trgt_vocab_size)
 
-        # Create Position Encoders
-        src_pos = PositionalEncoding(d_model, src_seq_len, dropout)
-        trgt_pos = PositionalEncoding(d_model, trgt_seq_len, dropout)
+    # Create Position Encoders
+    src_pos = PositionalEncoding(d_model, src_seq_len, dropout)
+    trgt_pos = PositionalEncoding(d_model, trgt_seq_len, dropout)
 
-        encoder_stack = []
-        for _ in range(N):
-            encoder_self_attention = MultiHeadAttention(d_model, h, dropout)
-            feed_forward = FeedForwardNetwork(d_model, d_ff, dropout)
-            encoder_block = EncoderBlock(encoder_self_attention, feed_forward, dropout)
-            encoder_stack.append(encoder_block)
+    encoder_stack = []
+    for _ in range(N):
+        encoder_self_attention = MultiHeadAttention(d_model, h, dropout)
+        feed_forward = FeedForwardNetwork(d_model, d_ff, dropout)
+        encoder_block = EncoderBlock(encoder_self_attention, feed_forward, dropout)
+        encoder_stack.append(encoder_block)
 
-        decoder_stack = []
-        for _ in range(N):
-            decoder_self_attention = MultiHeadAttention(d_model, h, dropout)
-            decoder_cross_attention = MultiHeadAttention(d_model, h, dropout)
-            feed_forward = FeedForwardNetwork(d_model, d_ff, dropout)
-            decoder_block = DecoderBlock(decoder_self_attention, decoder_cross_attention, feed_forward, dropout)
-            decoder_stack.append(decoder_block)
+    decoder_stack = []
+    for _ in range(N):
+        decoder_self_attention = MultiHeadAttention(d_model, h, dropout)
+        decoder_cross_attention = MultiHeadAttention(d_model, h, dropout)
+        feed_forward = FeedForwardNetwork(d_model, d_ff, dropout)
+        decoder_block = DecoderBlock(decoder_self_attention, decoder_cross_attention, feed_forward, dropout)
+        decoder_stack.append(decoder_block)
 
-        encoder = Encoder(nn.ModuleList(encoder_stack))
-        decoder = Decoder(nn.ModuleList(decoder_stack))
+    encoder = Encoder(nn.ModuleList(encoder_stack))
+    decoder = Decoder(nn.ModuleList(decoder_stack))
 
-        proj_layer = ProjectionLayer(d_model, trgt_vocab_size)
+    proj_layer = ProjectionLayer(d_model, trgt_vocab_size)
 
-        tranformer = Transformer(encoder, decoder, src_embedding, trgt_embedding, src_pos, trgt_pos, proj_layer)
+    transformer = Transformer(encoder, decoder, src_embedding, trgt_embedding, src_pos, trgt_pos, proj_layer)
 
-        for p in tranformer.parameters():
-            if p.dim() > 1: 
-                nn.init.xavier_uniform_(p)
+    for p in transformer.parameters():
+        if p.dim() > 1: 
+            nn.init.xavier_uniform_(p)
 
-        return tranformer
+    return transformer
