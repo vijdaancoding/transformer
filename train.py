@@ -10,12 +10,113 @@ from tokenizers.models import WordLevel
 from tokenizers.trainers import WordLevelTrainer
 from tokenizers.pre_tokenizers import Whitespace
 
+from torchmetrics.text import CharErrorRate, WordErrorRate, BLEUScore
 from tqdm import tqdm
+import os
 
 
 from dataset import En_to_Ur_Dataset, causal_mask
 from model import build_transformer
 from config import get_weights_file_path, get_config
+
+def greedy_decode(model, source, source_mask, tokenizer_src, tokenizer_tgt, max_len, device):
+    sos_idx = tokenizer_tgt.token_to_id('[SOS]')
+    eos_idx = tokenizer_tgt.token_to_id('[EOS]')
+
+    # Precompute the encoder output and reuse it for every step
+    encoder_output = model.encode(source, source_mask)
+    # Initialize the decoder input with the sos token
+    decoder_input = torch.empty(1, 1).fill_(sos_idx).type_as(source).to(device)
+    while True:
+        if decoder_input.size(1) == max_len:
+            break
+
+        # build mask for target
+        decoder_mask = causal_mask(decoder_input.size(1)).type_as(source_mask).to(device)
+
+        # calculate output
+        out = model.decode(encoder_output, source_mask, decoder_input, decoder_mask)
+
+        # get next token
+        prob = model.projection(out[:, -1])
+        _, next_word = torch.max(prob, dim=1)
+        decoder_input = torch.cat(
+            [decoder_input, torch.empty(1, 1).type_as(source).fill_(next_word.item()).to(device)], dim=1
+        )
+
+        if next_word == eos_idx:
+            break
+
+    return decoder_input.squeeze(0)
+
+def run_validation(model, validation_ds, tokenizer_src, tokenizer_tgt, max_len, device, print_msg, global_step, writer, num_examples=2):
+    model.eval()
+    count = 0  
+    
+    source_texts = []
+    expected = []
+    predicted = []
+
+    try:
+        # get the console window width
+        with os.popen('stty size', 'r') as console:
+            _, console_width = console.read().split()
+            console_width = int(console_width)
+    except:
+        # If we can't get the console width, use 80 as default
+        console_width = 80
+
+    with torch.no_grad():
+        for batch in validation_ds:
+            count += 1
+            encoder_input = batch["encoder_input"].to(device) # (b, seq_len)
+            encoder_mask = batch["encoder_mask"].to(device) # (b, 1, 1, seq_len)
+
+            # check that the batch size is 1
+            assert encoder_input.size(
+                0) == 1, "Batch size must be 1 for validation"
+
+            model_out = greedy_decode(model, encoder_input, encoder_mask, tokenizer_src, tokenizer_tgt, max_len, device)
+
+            source_text = batch["src_text"][0]
+            target_text = batch["trgt_text"][0]
+            model_out_text = tokenizer_tgt.decode(model_out.detach().cpu().numpy())
+
+            source_texts.append(source_text)
+            expected.append(target_text)
+            predicted.append(model_out_text)
+            
+            # Print the source, target and model output
+            print_msg('-'*console_width)
+            print_msg(f"{f'SOURCE: ':>12}{source_text}")
+            print_msg(f"{f'TARGET: ':>12}{target_text}")
+            print_msg(f"{f'PREDICTED: ':>12}{model_out_text}")
+
+            if count == num_examples:
+                print_msg('-'*console_width)
+                break
+    
+    if writer:
+        # Evaluate the character error rate
+        # Compute the char error rate 
+        metric = CharErrorRate()
+        cer = metric(predicted, expected)
+        writer.add_scalar('validation cer', cer, global_step)
+        writer.flush()
+
+        # Compute the word error rate
+        metric = WordErrorRate()
+        wer = metric(predicted, expected)
+        writer.add_scalar('validation wer', wer, global_step)
+        writer.flush()
+
+        # Compute the BLEU metric
+        metric = BLEUScore()
+        bleu = metric(predicted, expected)
+        writer.add_scalar('validation BLEU', bleu, global_step)
+        writer.flush()
+
+    
 
 def get_all_sentences(dataset, lang):
     for item in dataset:
@@ -39,8 +140,8 @@ def build_tokenizer(config, dataset, lang):
     return tokenizer
 
 def get_dataset(config):
-    train_data = load_dataset('Helsinki-NLP/opus-100', f'{config['lang_src']}-{config['lang_trgt']}', split='train')
-    val_data = load_dataset('Helsinki-NLP/opus-100', f'{config['lang_src']}-{config['lang_trgt']}', split='validation')
+    train_data = load_dataset('Helsinki-NLP/opus-100', f"{config['lang_src']}-{config['lang_trgt']}", split='train')
+    val_data = load_dataset('Helsinki-NLP/opus-100', f"{config['lang_src']}-{config['lang_trgt']}", split='validation')
 
     dataset_raw = concatenate_datasets([train_data, val_data])
 
@@ -99,6 +200,7 @@ def train_model(config):
 
     for epoch in range(initial_epoch, config['num_epochs']):
         model.train()
+
         batch_iterator = tqdm(train_dataloader, desc=f'Processing epoch{epoch:02d}')
         for batch in batch_iterator:
             encoder_input = batch['encoder_input'].to(device)
@@ -113,7 +215,7 @@ def train_model(config):
             target = batch['target'].to(device)
 
             loss = loss_fn(proj_output.view(-1, tokenizer_trgt.get_vocab_size()), target.view(-1))
-            batch_iterator.set_postfix({f"loss:" f"{loss.item():6.3f}"})
+            batch_iterator.set_postfix({f"loss": f"{loss.item():6.3f}"})
 
             writer.add_scalar('train_loss', loss.item(), global_step)
             writer.flush()
@@ -124,6 +226,8 @@ def train_model(config):
             optimizer.zero_grad()
 
             global_step+=1
+
+            run_validation(model, val_dataloader, tokenizer_src, tokenizer_trgt, config['seq_len'], device, lambda msg: batch_iterator.write(msg), global_step, writer)
 
         model_filename = get_weights_file_path(config, f'{epoch:02d}')
         torch.save({
